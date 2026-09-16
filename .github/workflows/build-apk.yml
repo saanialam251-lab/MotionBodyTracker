@@ -11,6 +11,10 @@ jobs:
     name: Assemble debug APK
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,22 +25,33 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
+      - name: Accept Android SDK licenses
+        run: |
+          set +e
+          SDKMANAGER=""
+          for p in \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager" \
+            "$ANDROID_HOME/cmdline-tools/12.0/bin/sdkmanager"
+          do
+            if [ -x "$p" ]; then SDKMANAGER="$p"; break; fi
+          done
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1
+          fi
+          exit 0
+
       - name: Check MediaPipe models
         run: |
           mkdir -p app/src/main/assets
+          ls -la app/src/main/assets || true
           if [ ! -f app/src/main/assets/hand_landmarker.task ] || [ ! -f app/src/main/assets/pose_landmarker.task ]; then
-            echo "WARNING: hand_landmarker.task or pose_landmarker.task is missing."
-            echo "The APK will still build, but tracking will not start until both files are in assets."
-          else
-            ls -lh app/src/main/assets/*.task
+            echo "WARNING: model .task files missing from assets"
           fi
 
       - name: Build debug APK
