@@ -1,0 +1,14 @@
+**Upload name:** `app/src/main/assets/PUT_MODELS_HERE.txt`
+
+---
+
+## 12 — binary, do not paste as text
+
+Upload the real files (from your phone / the zip), not typed text.
+
+**Upload name:** `app/src/main/assets/hand_landmarker.task`  
+**Upload name:** `app/src/main/assets/pose_landmarker.task`
+
+---
+
+## 13
