@@ -48,12 +48,16 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             try {
                 helper = LandmarkerHelper(app)
-                analyzer = FrameAnalyzer(helper, viewModelScope) { motionPct, hot, label, gesture ->
+                analyzer = FrameAnalyzer(helper, viewModelScope) { motionPct, hot, label, gesture, actionGesture ->
                     val current = _ui.value
                     var running = current.running
                     var snapshotRequest = current.snapshotRequest
                     if (current.gesturesOn) {
-                        when (gesture) {
+                        // actionGesture is edge-triggered by FrameAnalyzer: it is only
+                        // non-NONE on the single frame a gesture first becomes stable,
+                        // so each branch below fires once per palm/peace/fist, not once
+                        // per analyzed frame the gesture stays held.
+                        when (actionGesture) {
                             HandGesture.OPEN_PALM -> if (!running) {
                                 running = true
                                 analyzer.running = true
