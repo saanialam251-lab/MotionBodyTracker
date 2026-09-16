@@ -9,6 +9,10 @@ data class MotionResult(
 
 data class MotionBox(val x: Float, val y: Float, val w: Float, val h: Float)
 
+/**
+ * Frame differencing on the camera Y (luma) plane.
+ * A pixel counts as moved when its brightness change exceeds [pixelThreshold].
+ */
 class MotionDetector(
     private val width: Int = 96,
     private val height: Int = 54,
@@ -19,8 +23,14 @@ class MotionDetector(
 
     fun reset() { prev = null }
 
-    fun process(yBuffer: java.nio.ByteBuffer, rowStride: Int, imgW: Int, imgH: Int): MotionResult {
-        val down = downscale(yBuffer, rowStride, imgW, imgH)
+    fun process(
+        yBuffer: java.nio.ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        imgW: Int,
+        imgH: Int
+    ): MotionResult {
+        val down = downscale(yBuffer, rowStride, pixelStride, imgW, imgH)
         val old = prev
         if (old == null) {
             prev = down
@@ -55,15 +65,26 @@ class MotionDetector(
         return MotionResult(pct, box)
     }
 
-    private fun downscale(y: java.nio.ByteBuffer, rowStride: Int, imgW: Int, imgH: Int): ByteArray {
+    // pixelStride matters because the Y plane's bytes aren't guaranteed to be
+    // tightly packed (stride 1) on every device — some report a larger
+    // pixelStride, in which case reading consecutive bytes without skipping
+    // by it silently samples the wrong pixels.
+    private fun downscale(
+        y: java.nio.ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        imgW: Int,
+        imgH: Int
+    ): ByteArray {
         val out = ByteArray(width * height)
         val saved = y.position()
+        val stride = if (pixelStride <= 0) 1 else pixelStride
         for (oy in 0 until height) {
             val sy = oy * imgH / height
             val rowBase = sy * rowStride
             for (ox in 0 until width) {
                 val sx = ox * imgW / width
-                val idx = rowBase + sx
+                val idx = rowBase + sx * stride
                 if (idx in 0 until y.limit()) {
                     out[oy * width + ox] = y.get(idx)
                 }
