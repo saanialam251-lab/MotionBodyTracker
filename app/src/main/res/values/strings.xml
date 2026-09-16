@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="sea_dark">#0B1220</color>
-    <color name="sea_mid">#16233D</color>
-    <color name="skeleton_green">#00E676</color>
-    <color name="joint_red">#FF4444</color>
-    <color name="motion_red">#F85149</color>
-    <color name="motion_green">#3FB950</color>
-    <color name="launcher_bg">#0B1220</color>
+    <string name="app_name">Motion + Body Tracker</string>
+    <string name="start_camera">Start</string>
+    <string name="stop_camera">Stop</string>
+    <string name="flip_camera">Flip</string>
+    <string name="snapshot">Shot</string>
+    <string name="hands">Hands</string>
+    <string name="body">Body</string>
+    <string name="motion">Motion</string>
+    <string name="gestures">Gestures</string>
 </resources>
