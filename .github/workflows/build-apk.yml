@@ -11,10 +11,6 @@ jobs:
     name: Assemble debug APK
     runs-on: ubuntu-latest
 
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,32 +26,65 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Accept Android SDK licenses
+      - name: Find Android SDK and write local.properties
         run: |
-          set +e
-          SDKMANAGER=""
-          for p in \
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager" \
-            "$ANDROID_HOME/cmdline-tools/12.0/bin/sdkmanager"
-          do
-            if [ -x "$p" ]; then SDKMANAGER="$p"; break; fi
-          done
-          if [ -n "$SDKMANAGER" ]; then
-            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1
-          fi
-          exit 0
+          set -e
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
 
-      - name: Check MediaPipe models
-        run: |
-          mkdir -p app/src/main/assets
-          ls -la app/src/main/assets || true
-          if [ ! -f app/src/main/assets/hand_landmarker.task ] || [ ! -f app/src/main/assets/pose_landmarker.task ]; then
-            echo "WARNING: model .task files missing from assets"
+          SDK=""
+          for d in \
+            "${ANDROID_HOME:-}" \
+            "${ANDROID_SDK_ROOT:-}" \
+            /usr/local/lib/android/sdk \
+            "$HOME/android-sdk"
+          do
+            if [ -n "$d" ] && [ -d "$d" ]; then
+              SDK="$d"
+              break
+            fi
+          done
+
+          if [ -z "$SDK" ]; then
+            SDK="$HOME/android-sdk"
+            mkdir -p "$SDK/cmdline-tools"
+            curl -sS -L -o /tmp/cmdtools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d "$SDK/cmdline-tools"
+            if [ -d "$SDK/cmdline-tools/cmdline-tools" ]; then
+              mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+            fi
+          fi
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK" > local.properties
+          echo "Wrote local.properties:"
+          cat local.properties
+
+          SM=""
+          for p in \
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK/cmdline-tools/16.0/bin/sdkmanager" \
+            "$SDK/cmdline-tools/12.0/bin/sdkmanager"
+          do
+            if [ -x "$p" ]; then SM="$p"; break; fi
+          done
+
+          if [ -n "$SM" ]; then
+            yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null 2>&1 || true
+            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
           fi
 
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Show error summary if build failed
+        if: failure()
+        run: |
+          echo "===== Look for the real error below ====="
+          find . -name "*.log" -path "*daemon*" | tail
+          ls -la app/build/outputs/apk/debug || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
