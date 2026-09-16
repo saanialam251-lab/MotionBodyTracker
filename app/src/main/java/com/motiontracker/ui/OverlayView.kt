@@ -13,8 +13,19 @@ import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.motiontracker.vision.HandGesture
 import com.motiontracker.vision.LandmarkConnections
 import com.motiontracker.vision.LandmarkFrame
+import kotlin.math.max
 import kotlin.math.sin
 
+/**
+ * Green-skeleton / red-joint overlay plus motion box with a pulsing glow.
+ *
+ * The camera preview (PreviewView) uses ScaleType.FILL_CENTER, which scales
+ * the camera image to fill the view and crops the overflow rather than
+ * stretching it to fit. To stay lined up with what's actually on screen,
+ * every normalized landmark/box coordinate here goes through the same
+ * "scale to cover, then center" transform instead of being stretched
+ * directly across the view's full width/height.
+ */
 class OverlayView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : View(context, attrs) {
@@ -48,43 +59,72 @@ class OverlayView @JvmOverloads constructor(
 
     private var startTime = System.currentTimeMillis()
 
+    /** Scale-to-cover transform matching PreviewView's FILL_CENTER, plus the
+     *  source dimensions it was computed against. */
+    private class Transform(val scale: Float, val offsetX: Float, val offsetY: Float, val srcW: Float, val srcH: Float)
+
+    private fun transformFor(f: LandmarkFrame): Transform {
+        val vw = width.toFloat().coerceAtLeast(1f)
+        val vh = height.toFloat().coerceAtLeast(1f)
+        // Before the first frame's real dimensions are known, fall back to
+        // treating the view itself as the source (scale 1, no offset) —
+        // i.e. the old, naive stretch-to-fit behavior — rather than divide
+        // by zero.
+        val srcW = if (f.frameWidth > 0) f.frameWidth.toFloat() else vw
+        val srcH = if (f.frameHeight > 0) f.frameHeight.toFloat() else vh
+        val scale = max(vw / srcW, vh / srcH)
+        val offsetX = (vw - srcW * scale) / 2f
+        val offsetY = (vh - srcH * scale) / 2f
+        return Transform(scale, offsetX, offsetY, srcW, srcH)
+    }
+
+    private fun mapX(nx: Float, t: Transform, mirrored: Boolean): Float {
+        val px = nx * t.srcW * t.scale + t.offsetX
+        return if (mirrored) width - px else px
+    }
+
+    private fun mapY(ny: Float, t: Transform): Float {
+        return ny * t.srcH * t.scale + t.offsetY
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val f = frame ?: return
-        val t = (System.currentTimeMillis() - startTime) / 1000f
-        val pulse = (sin(t * 4f) + 1f) / 2f
+        val t = transformFor(f)
+        val time = (System.currentTimeMillis() - startTime) / 1000f
+        val pulse = (sin(time * 4f) + 1f) / 2f
 
         f.hands.forEach { lm ->
             LandmarkConnections.HAND.forEach { (a, b) ->
                 if (a < lm.size && b < lm.size) {
-                    drawBone(canvas, lm[a], lm[b], f.mirrored)
+                    drawBone(canvas, lm[a], lm[b], t, f.mirrored)
                 }
             }
             lm.forEach { p ->
-                canvas.drawCircle(mapX(p.x(), f.mirrored), p.y() * height, 9f, jointPaint)
+                canvas.drawCircle(mapX(p.x(), t, f.mirrored), mapY(p.y(), t), 9f, jointPaint)
             }
         }
 
         f.pose?.let { lm ->
             LandmarkConnections.POSE.forEach { (a, b) ->
                 if (a < lm.size && b < lm.size && visible(lm[a]) && visible(lm[b])) {
-                    drawBone(canvas, lm[a], lm[b], f.mirrored)
+                    drawBone(canvas, lm[a], lm[b], t, f.mirrored)
                 }
             }
             lm.forEach { p ->
                 if (visible(p)) {
-                    canvas.drawCircle(mapX(p.x(), f.mirrored), p.y() * height, 9f, jointPaint)
+                    canvas.drawCircle(mapX(p.x(), t, f.mirrored), mapY(p.y(), t), 9f, jointPaint)
                 }
             }
         }
 
         f.motionBox?.let { b ->
-            val left = mapX(b.x, f.mirrored)
-            val right = mapX(b.x + b.w, f.mirrored)
+            val left = mapX(b.x, t, f.mirrored)
+            val right = mapX(b.x + b.w, t, f.mirrored)
             val l = minOf(left, right)
             val r = maxOf(left, right)
-            val top = b.y * height
-            val bottom = top + b.h * height
+            val top = mapY(b.y, t)
+            val bottom = mapY(b.y + b.h, t)
             val hot = f.motionPercent >= 8
             val col = if (hot) Color.parseColor("#F85149") else Color.parseColor("#3FB950")
             glowPaint.color = col
@@ -119,16 +159,12 @@ class OverlayView @JvmOverloads constructor(
         return bmp
     }
 
-    private fun drawBone(canvas: Canvas, a: NormalizedLandmark, b: NormalizedLandmark, mirrored: Boolean) {
+    private fun drawBone(canvas: Canvas, a: NormalizedLandmark, b: NormalizedLandmark, t: Transform, mirrored: Boolean) {
         canvas.drawLine(
-            mapX(a.x(), mirrored), a.y() * height,
-            mapX(b.x(), mirrored), b.y() * height,
+            mapX(a.x(), t, mirrored), mapY(a.y(), t),
+            mapX(b.x(), t, mirrored), mapY(b.y(), t),
             bonePaint
         )
-    }
-
-    private fun mapX(x: Float, mirrored: Boolean): Float {
-        return if (mirrored) (1f - x) * width else x * width
     }
 
     private fun visible(p: NormalizedLandmark): Boolean {
