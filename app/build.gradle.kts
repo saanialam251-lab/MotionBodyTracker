@@ -5,11 +5,11 @@ id("org.jetbrains.kotlin.plugin.compose")
 }
 android {
 namespace = "com.motiontracker"
-compileSdk = 34
+compileSdk = 35
 defaultConfig {
 applicationId = "com.motiontracker"
 minSdk = 24
-targetSdk = 34
+targetSdk = 35
 versionCode = 1
 versionName = "1.0"
 }
