@@ -19,6 +19,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -136,8 +137,8 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
         try {
             val provider = ProcessCameraProvider.getInstance(context).get()
             provider.unbindAll()
-            val preview = Preview.Builder().build().also {
-                it.surfaceProvider = previewView?.surfaceProvider
+            val preview = Preview.Builder().build().also { p ->
+                previewView?.let { pv -> p.setSurfaceProvider(pv.surfaceProvider) }
             }
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -241,14 +242,14 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "Gesture: ${if (ui.gesture == HandGesture.NONE) "-" else ui.gesture.name.replace('_', ' ')}",
+                "Gesture: ${if (ui.gesture == HandGesture.NONE) "—" else ui.gesture.name.replace('_', ' ')}",
                 color = Color(0xFF9DB4D8),
                 fontSize = MaterialTheme.typography.bodySmall.fontSize
             )
             Spacer(Modifier.height(6.dp))
             Text("Motion: ${ui.motionPercent}%", color = Color.White)
             val fill by animateFloatAsState(
-                targetValue = (ui.motionPercent * 4).coerceAtMost(100f) / 100f,
+                targetValue = (ui.motionPercent * 4).coerceAtMost(100) / 100f,
                 label = "fill"
             )
             Spacer(Modifier.height(4.dp))
@@ -336,7 +337,7 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
 
         if (!ui.modelsReady) {
             Text(
-                "Model files missing — put hand_landmarker.task and pose_landmarker.task in app/src/main/assets",
+                "Model files missing — put hand_landmarker.task and pose_landmarker.task in app/src/main/assets (see README)",
                 color = MotionRed,
                 modifier = Modifier.align(Alignment.Center).padding(24.dp)
             )
