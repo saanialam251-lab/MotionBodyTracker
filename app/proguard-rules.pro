@@ -1,0 +1,3 @@
+-keep class com.google.mediapipe.** { ; }
+-dontwarn com.google.mediapipe.*
+-keep class com.motiontracker.** { *; }
