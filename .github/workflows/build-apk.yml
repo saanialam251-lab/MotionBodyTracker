@@ -26,65 +26,51 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Find Android SDK and write local.properties
+      - name: Prepare Android SDK
         run: |
           set -e
-          echo "ANDROID_HOME=${ANDROID_HOME:-}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "Using SDK=$SDK"
+          ls -la "$SDK" || true
+          ls -la "$SDK/platforms" || true
 
-          SDK=""
-          for d in \
-            "${ANDROID_HOME:-}" \
-            "${ANDROID_SDK_ROOT:-}" \
-            /usr/local/lib/android/sdk \
-            "$HOME/android-sdk"
-          do
-            if [ -n "$d" ] && [ -d "$d" ]; then
-              SDK="$d"
-              break
-            fi
-          done
-
-          if [ -z "$SDK" ]; then
-            SDK="$HOME/android-sdk"
-            mkdir -p "$SDK/cmdline-tools"
-            curl -sS -L -o /tmp/cmdtools.zip \
-              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q /tmp/cmdtools.zip -d "$SDK/cmdline-tools"
-            if [ -d "$SDK/cmdline-tools/cmdline-tools" ]; then
-              mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
-            fi
-          fi
-
+          echo "sdk.dir=$SDK" > local.properties
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          echo "sdk.dir=$SDK" > local.properties
-          echo "Wrote local.properties:"
-          cat local.properties
 
-          SM=""
-          for p in \
-            "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "$SDK/cmdline-tools/16.0/bin/sdkmanager" \
-            "$SDK/cmdline-tools/12.0/bin/sdkmanager"
-          do
-            if [ -x "$p" ]; then SM="$p"; break; fi
-          done
-
+          SM=$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)
+          echo "sdkmanager=$SM"
           if [ -n "$SM" ]; then
             yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null 2>&1 || true
-            "$SM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
+            "$SM" --sdk_root="$SDK" \
+              "platforms;android-35" \
+              "platforms;android-34" \
+              "build-tools;35.0.0" \
+              "build-tools;34.0.0" \
+              "platform-tools" || true
           fi
+          echo "Platforms now:"
+          ls "$SDK/platforms" || true
 
       - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace --no-daemon
-
-      - name: Show error summary if build failed
-        if: failure()
         run: |
-          echo "===== Look for the real error below ====="
-          find . -name "*.log" -path "*daemon*" | tail
-          ls -la app/build/outputs/apk/debug || true
+          set +e
+          gradle :app:assembleDebug --stacktrace --no-daemon > build-log.txt 2>&1
+          STATUS=$?
+          echo "===== FULL GRADLE LOG ====="
+          cat build-log.txt
+          echo "===== WHAT WENT WRONG ====="
+          grep -A 25 "What went wrong" build-log.txt || true
+          grep -E "^e: |FAILURE:" build-log.txt || true
+          exit $STATUS
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: build-log.txt
+          if-no-files-found: warn
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
