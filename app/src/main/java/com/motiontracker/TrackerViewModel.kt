@@ -3,6 +3,8 @@ package com.motiontracker
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.motiontracker.vision.FaceHelper
+import com.motiontracker.vision.FaceStore
 import com.motiontracker.vision.FrameAnalyzer
 import com.motiontracker.vision.HandGesture
 import com.motiontracker.vision.LandmarkFrame
@@ -18,6 +20,7 @@ data class TrackerUiState(
     val bodyOn: Boolean = true,
     val motionOn: Boolean = true,
     val gesturesOn: Boolean = true,
+    val faceOn: Boolean = true,
     val sensitivity: Int = 12,
     val handsFound: Int = 0,
     val bodyFound: Boolean = false,
@@ -27,10 +30,25 @@ data class TrackerUiState(
     val snapshotRequest: Long = 0L,
     val frame: LandmarkFrame? = null,
     val log: List<String> = emptyList(),
-    val modelsReady: Boolean = true
+    val modelsReady: Boolean = true,
+    // Face detector model present? If false, the Face toggle does nothing.
+    val faceModelReady: Boolean = false,
+    // Face recognition (embedding) model present? If false, faces are
+    // detected (boxes shown) but never labeled known/"Unknown" and can't be
+    // enrolled — see FaceHelper's doc comment for the required asset.
+    val faceEmbedderReady: Boolean = false,
+    val facesFound: Int = 0,
+    val faceNames: List<String> = emptyList(),
+    val knownFaceNames: List<String> = emptyList(),
+    val enrollMessage: String? = null
 )
 
 class TrackerViewModel(app: Application) : AndroidViewModel(app) {
+
+    // Kept as an explicit property (rather than relying on the bare
+    // constructor parameter) so it's reachable from member functions like
+    // enrollFace(), not just from code inside init{}.
+    private val appContext: Application = app
 
     private val _ui = MutableStateFlow(TrackerUiState())
     val ui: StateFlow<TrackerUiState> = _ui.asStateFlow()
@@ -38,6 +56,8 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     lateinit var analyzer: FrameAnalyzer
         private set
     private lateinit var helper: LandmarkerHelper
+    private lateinit var faceHelper: FaceHelper
+    private lateinit var faceStore: FaceStore
 
     init {
         if (!LandmarkerHelper.modelsExist(app)) {
@@ -48,7 +68,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             try {
                 helper = LandmarkerHelper(app)
-                analyzer = FrameAnalyzer(helper, viewModelScope) { motionPct, hot, label, gesture, actionGesture ->
+                faceHelper = FaceHelper(app)
+                faceStore = FaceStore(app)
+                val faceModelReady = FaceHelper.detectorModelExists(app)
+                val faceEmbedderReady = FaceHelper.embedderModelExists(app)
+
+                analyzer = FrameAnalyzer(helper, faceHelper, faceStore, viewModelScope) {
+                    motionPct, hot, label, gesture, actionGesture, unknownFaceAlert ->
+
                     val current = _ui.value
                     var running = current.running
                     var snapshotRequest = current.snapshotRequest
@@ -71,9 +98,18 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                             else -> {}
                         }
                     }
-                    val newLog = if (label.isNotBlank()) {
+
+                    if (unknownFaceAlert) {
+                        NotificationHelper.notifyUnknownFace(appContext)
+                    }
+
+                    var newLog = if (label.isNotBlank()) {
                         (listOf(label) + current.log).distinct().take(6)
                     } else current.log
+                    if (unknownFaceAlert) {
+                        newLog = (listOf("Unknown face detected") + newLog).distinct().take(6)
+                    }
+
                     _ui.value = current.copy(
                         running = running,
                         snapshotRequest = snapshotRequest,
@@ -83,9 +119,18 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                         bodyFound = analyzer.lastBody,
                         gesture = gesture,
                         frame = analyzer.lastFrame,
-                        log = newLog
+                        log = newLog,
+                        facesFound = analyzer.lastFaces.size,
+                        faceNames = analyzer.lastFaces.map { it.name ?: "Face" }
                     )
                 }
+                analyzer.faceOn = faceModelReady
+                _ui.value = _ui.value.copy(
+                    faceModelReady = faceModelReady,
+                    faceEmbedderReady = faceEmbedderReady,
+                    faceOn = faceModelReady,
+                    knownFaceNames = faceStore.names()
+                )
             } catch (e: Exception) {
                 _ui.value = TrackerUiState(
                     modelsReady = false,
@@ -133,6 +178,13 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         if (::analyzer.isInitialized) analyzer.gesturesOn = next
     }
 
+    fun toggleFace() {
+        if (!_ui.value.faceModelReady) return
+        val next = !_ui.value.faceOn
+        _ui.value = _ui.value.copy(faceOn = next)
+        if (::analyzer.isInitialized) analyzer.faceOn = next
+    }
+
     fun setSensitivity(v: Int) {
         _ui.value = _ui.value.copy(sensitivity = v)
         if (::analyzer.isInitialized) analyzer.sensitivity = v
@@ -142,8 +194,38 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(snapshotRequest = 0L)
     }
 
+    /** Enrolls [name] using the embedding of the most recently seen face.
+     * No-op (with an explanatory [TrackerUiState.enrollMessage]) if there's
+     * no face in frame or the recognition model isn't bundled. */
+    fun enrollFace(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        if (!::analyzer.isInitialized || !::faceStore.isInitialized) return
+        val embedding = analyzer.lastFaces.firstOrNull { it.embedding != null }?.embedding
+        if (embedding == null) {
+            _ui.value = _ui.value.copy(
+                enrollMessage = if (!_ui.value.faceEmbedderReady) {
+                    "Face recognition model not installed — see README"
+                } else {
+                    "No face detected right now — look at the camera and try again"
+                }
+            )
+            return
+        }
+        faceStore.enroll(trimmed, embedding)
+        _ui.value = _ui.value.copy(
+            enrollMessage = "Enrolled \"$trimmed\"",
+            knownFaceNames = faceStore.names()
+        )
+    }
+
+    fun clearEnrollMessage() {
+        _ui.value = _ui.value.copy(enrollMessage = null)
+    }
+
     override fun onCleared() {
         super.onCleared()
         if (::helper.isInitialized) helper.close()
+        if (::faceHelper.isInitialized) faceHelper.close()
     }
 }
