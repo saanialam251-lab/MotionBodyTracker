@@ -253,7 +253,7 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
 
         LaunchedEffect(ui.enrollMessage) {
             ui.enrollMessage?.let {
-                Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, it, Toast.LENGTH_LONG).show()
                 vm.clearEnrollMessage()
             }
         }
