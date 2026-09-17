@@ -46,9 +46,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -105,6 +107,22 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasPermission = granted }
+
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* no state to track — beep just won't fire if denied */ }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    var showEnrollDialog by remember { mutableStateOf(false) }
+    var enrollName by remember { mutableStateOf("") }
 
     LaunchedEffect(ui.frame) {
         ui.frame?.let {
@@ -214,6 +232,11 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             ToggleButton("Body", ui.bodyOn) { vm.toggleBody() }
             ToggleButton("Motion", ui.motionOn) { vm.toggleMotion() }
             ToggleButton("Gestures", ui.gesturesOn) { vm.toggleGestures() }
+            ToggleButton("Face", ui.faceOn && ui.faceModelReady) { vm.toggleFace() }
+            TrackerButton("Enroll", enabled = ui.faceOn && ui.facesFound > 0) {
+                enrollName = ""
+                showEnrollDialog = true
+            }
             TrackerButton("Shot", enabled = ui.running) {
                 val pv = previewView ?: return@TrackerButton
                 try {
@@ -228,11 +251,42 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             }
         }
 
+        LaunchedEffect(ui.enrollMessage) {
+            ui.enrollMessage?.let {
+                Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                vm.clearEnrollMessage()
+            }
+        }
+
+        if (showEnrollDialog) {
+            AlertDialog(
+                onDismissRequest = { showEnrollDialog = false },
+                title = { Text("Enroll this face") },
+                text = {
+                    OutlinedTextField(
+                        value = enrollName,
+                        onValueChange = { enrollName = it },
+                        label = { Text("Name") },
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        vm.enrollFace(enrollName)
+                        showEnrollDialog = false
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    Button(onClick = { showEnrollDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
         Column(
             Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 12.dp, top = 76.dp)
-                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.82f), RoundedCornerShape(12.dp))
                 .padding(12.dp)
         ) {
             Text(
@@ -246,6 +300,15 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
                 color = Color(0xFF9DB4D8),
                 fontSize = MaterialTheme.typography.bodySmall.fontSize
             )
+            if (ui.faceModelReady) {
+                Spacer(Modifier.height(4.dp))
+                val faceText = if (ui.facesFound == 0) {
+                    "Faces: 0"
+                } else {
+                    "Faces: ${ui.facesFound} (${ui.faceNames.joinToString(", ")})"
+                }
+                Text(faceText, color = Color(0xFF9DB4D8), fontSize = MaterialTheme.typography.bodySmall.fontSize)
+            }
             Spacer(Modifier.height(6.dp))
             Text("Motion: ${ui.motionPercent}%", color = Color.White)
             val fill by animateFloatAsState(
@@ -278,7 +341,7 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             Slider(
                 value = ui.sensitivity.toFloat(),
                 onValueChange = { vm.setSensitivity(it.toInt()) },
-                valueRange = 3f..40f,
+                valueRange = 1f..100f,
                 modifier = Modifier.width(150.dp)
             )
         }
@@ -309,7 +372,7 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             Modifier
                 .align(Alignment.BottomStart)
                 .padding(12.dp)
-                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .widthIn(max = 300.dp)
         ) {
@@ -340,6 +403,13 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
                 "Model files missing — put hand_landmarker.task and pose_landmarker.task in app/src/main/assets (see README)",
                 color = MotionRed,
                 modifier = Modifier.align(Alignment.Center).padding(24.dp)
+            )
+        } else if (!ui.faceModelReady) {
+            Text(
+                "Face detection off — add face_detection_short_range.tflite to app/src/main/assets to enable it (see README)",
+                color = Color(0xFF7C93B2),
+                fontSize = MaterialTheme.typography.bodySmall.fontSize,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 132.dp, start = 24.dp, end = 24.dp)
             )
         }
     }
