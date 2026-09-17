@@ -2,6 +2,8 @@ package com.motiontracker.vision
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.RectF
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
@@ -16,18 +18,28 @@ data class LandmarkFrame(
     val motionBox: MotionBox?,
     val gesture: HandGesture = HandGesture.NONE,
     val mirrored: Boolean = true,
-    // Dimensions of the coordinate space the landmarks / motionBox above are
-    // normalized against: the camera frame *after* device-rotation
+    // Dimensions of the coordinate space the landmarks / motionBox / faces
+    // above are normalized against: the camera frame *after* device-rotation
     // correction, matching what was actually fed to MediaPipe. 0 until the
     // first frame has been processed.
     val frameWidth: Int = 0,
-    val frameHeight: Int = 0
+    val frameHeight: Int = 0,
+    val faces: List<FaceMatch> = emptyList()
 )
 
 class FrameAnalyzer(
     private val helper: LandmarkerHelper,
+    private val faceHelper: FaceHelper,
+    private val faceStore: FaceStore,
     private val scope: CoroutineScope,
-    private val onUpdate: (motionPct: Int, hot: Boolean, label: String, gesture: HandGesture, actionGesture: HandGesture) -> Unit
+    private val onUpdate: (
+        motionPct: Int,
+        hot: Boolean,
+        label: String,
+        gesture: HandGesture,
+        actionGesture: HandGesture,
+        unknownFaceAlert: Boolean
+    ) -> Unit
 ) : ImageAnalysis.Analyzer {
 
     @Volatile var running = false
@@ -35,12 +47,14 @@ class FrameAnalyzer(
     @Volatile var bodyOn = true
     @Volatile var motionOn = true
     @Volatile var gesturesOn = true
+    @Volatile var faceOn = true
     @Volatile var sensitivity = 12
     @Volatile var frontCamera = true
 
     @Volatile var lastHands = 0
     @Volatile var lastBody = false
     @Volatile var lastGesture = HandGesture.NONE
+    @Volatile var lastFaces: List<FaceMatch> = emptyList()
     @Volatile var lastFrame: LandmarkFrame? = null
 
     private val motion = MotionDetector()
@@ -54,6 +68,12 @@ class FrameAnalyzer(
     // every analyzed frame. Re-arms once the hand releases the gesture.
     private var firedGesture = HandGesture.NONE
 
+    // Same idea for unknown faces, but with a re-arm cooldown instead of a
+    // pure edge trigger: fires once as soon as an unknown face appears, then
+    // (if it lingers) again every UNKNOWN_ALERT_COOLDOWN_MS so a stranger who
+    // stays in frame still gets flagged periodically, not just once ever.
+    private var lastUnknownAlertAt = 0L
+
     override fun analyze(image: ImageProxy) {
         try {
             val trackFull = running
@@ -61,7 +81,8 @@ class FrameAnalyzer(
 
             // "Display space" = the frame's dimensions after correcting for
             // device/sensor rotation — the same space the rotated bitmap fed
-            // to MediaPipe uses, so landmarks and the motion box line up.
+            // to MediaPipe uses, so landmarks, the motion box, and face boxes
+            // all line up with each other and with what's on screen.
             val dispW: Int
             val dispH: Int
             if (rotationDegrees == 90 || rotationDegrees == 270) {
@@ -84,11 +105,12 @@ class FrameAnalyzer(
                 box = res.box?.let { rotateToDisplay(it, rotationDegrees) }
             }
 
-            val needBitmap = gesturesOn || (trackFull && (handsOn || bodyOn))
+            val needBitmap = gesturesOn || faceOn || (trackFull && (handsOn || bodyOn))
             val bitmap = if (needBitmap) image.toRotatedBitmap() else null
             if (bitmap != null) {
                 if (gesturesOn || (trackFull && handsOn)) helper.detectHands(bitmap)
                 if (trackFull && bodyOn) helper.detectPose(bitmap)
+                if (faceOn) faceHelper.detect(bitmap)
             }
 
             val hands = helper.latestHands?.landmarks() ?: emptyList()
@@ -96,15 +118,34 @@ class FrameAnalyzer(
             lastHands = hands.size
             lastBody = pose != null
 
+            val faces = if (faceOn && bitmap != null) {
+                buildFaceMatches(bitmap)
+            } else {
+                emptyList()
+            }
+            lastFaces = faces
+
             val rawGesture = if (gesturesOn) GestureRecognizer.classifyFirst(hands) else HandGesture.NONE
             val stable = stabilize(rawGesture)
             lastGesture = stable
             val actionGesture = actionEdge(stable)
 
-            lastFrame = LandmarkFrame(hands, pose, pct, box, stable, frontCamera, dispW, dispH)
+            lastFrame = LandmarkFrame(hands, pose, pct, box, stable, frontCamera, dispW, dispH, faces)
 
             val hot = motionOn && pct >= sensitivity
             val now = System.currentTimeMillis()
+
+            val hasUnknown = faceOn && faceHelper.hasEmbedder && faces.any { it.name == "Unknown" }
+            val fireUnknownAlert = if (hasUnknown) {
+                if (now - lastUnknownAlertAt > UNKNOWN_ALERT_COOLDOWN_MS) {
+                    lastUnknownAlertAt = now
+                    true
+                } else false
+            } else {
+                lastUnknownAlertAt = 0L
+                false
+            }
+
             val label = when {
                 stable != HandGesture.NONE && now - lastGestureAt > 1200 -> {
                     lastGestureAt = now
@@ -117,12 +158,69 @@ class FrameAnalyzer(
                 }
                 else -> ""
             }
-            scope.launch(Dispatchers.Main) { onUpdate(pct, hot, label, stable, actionGesture) }
+            scope.launch(Dispatchers.Main) {
+                onUpdate(pct, hot, label, stable, actionGesture, fireUnknownAlert)
+            }
         } catch (_: Exception) {
             // drop this frame
         } finally {
             image.close()
         }
+    }
+
+    /** Runs FaceDetector's latest result through the embedder + FaceStore to
+     * turn raw detections into named/"Unknown" [FaceMatch]es. */
+    private fun buildFaceMatches(bitmap: Bitmap): List<FaceMatch> {
+        val result = faceHelper.latestFaces ?: return emptyList()
+        return result.detections().map { det ->
+            val pxRect = detectionToPixelRect(det, bitmap.width, bitmap.height)
+            val norm = pixelRectToNormalized(pxRect, bitmap.width, bitmap.height)
+            if (faceHelper.hasEmbedder) {
+                val emb = faceHelper.embed(bitmap, pxRect)
+                if (emb != null) {
+                    val match = faceStore.match(emb)
+                    FaceMatch(norm, match?.first ?: "Unknown", match?.second ?: 0f, emb)
+                } else {
+                    FaceMatch(norm, null, 0f, null)
+                }
+            } else {
+                // Detector-only mode (no embedder model bundled): boxes with
+                // no known/unknown label and nothing to enroll from yet.
+                FaceMatch(norm, null, 0f, null)
+            }
+        }
+    }
+
+    /**
+     * MediaPipe's documented behavior for Detection.boundingBox() is pixel
+     * coordinates in [0,width) x [0,height) of the frame passed in. This
+     * guards against the (unlikely, but cheap to handle) case of a build
+     * returning normalized [0,1] coordinates instead, so a mismatch degrades
+     * to a mis-sized box rather than a crash or wildly-offset one.
+     */
+    private fun detectionToPixelRect(
+        det: com.google.mediapipe.tasks.components.containers.Detection,
+        bmpW: Int,
+        bmpH: Int
+    ): Rect {
+        val bb = det.boundingBox()
+        val looksNormalized = bb.right <= 1.5f && bb.bottom <= 1.5f
+        return if (looksNormalized) {
+            Rect(
+                (bb.left * bmpW).toInt(),
+                (bb.top * bmpH).toInt(),
+                (bb.right * bmpW).toInt(),
+                (bb.bottom * bmpH).toInt()
+            )
+        } else {
+            Rect(bb.left.toInt(), bb.top.toInt(), bb.right.toInt(), bb.bottom.toInt())
+        }
+    }
+
+    private fun pixelRectToNormalized(r: Rect, bmpW: Int, bmpH: Int): RectF {
+        val w = bmpW.coerceAtLeast(1).toFloat()
+        val h = bmpH.coerceAtLeast(1).toFloat()
+        return RectF(r.left / w, r.top / h, r.right / w, r.bottom / h)
     }
 
     private fun stabilize(current: HandGesture): HandGesture {
@@ -155,11 +253,11 @@ class FrameAnalyzer(
     /**
      * MotionDetector reads the raw, un-rotated sensor buffer directly (no
      * Bitmap conversion, for performance), so [box] is normalized against
-     * the sensor's own width/height. Hand/pose landmarks, by contrast, come
-     * from a bitmap we already rotated to match on-screen orientation.
+     * the sensor's own width/height. Hand/pose/face results, by contrast,
+     * come from a bitmap we already rotated to match on-screen orientation.
      * Without this step the motion box would render sideways and in the
-     * wrong place relative to the skeleton whenever [rotationDegrees] is 90
-     * or 270 — the common case for a portrait-locked activity with a
+     * wrong place relative to everything else whenever [rotationDegrees] is
+     * 90 or 270 — the common case for a portrait-locked activity with a
      * landscape-mounted camera sensor (i.e. most phones).
      */
     private fun rotateToDisplay(box: MotionBox, rotationDegrees: Int): MotionBox {
@@ -187,6 +285,10 @@ class FrameAnalyzer(
     }
 
     fun resetMotion() = motion.reset()
+
+    companion object {
+        private const val UNKNOWN_ALERT_COOLDOWN_MS = 30_000L
+    }
 }
 
 private fun ImageProxy.toRotatedBitmap(): Bitmap {
