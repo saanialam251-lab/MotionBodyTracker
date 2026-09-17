@@ -56,6 +56,15 @@ class OverlayView @JvmOverloads constructor(
         textSize = 36f
         typeface = Typeface.DEFAULT_BOLD
     }
+    private val facePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+    }
+    private val faceTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 30f
+        typeface = Typeface.DEFAULT_BOLD
+    }
 
     private var startTime = System.currentTimeMillis()
 
@@ -115,6 +124,25 @@ class OverlayView @JvmOverloads constructor(
                 if (visible(p)) {
                     canvas.drawCircle(mapX(p.x(), t, f.mirrored), mapY(p.y(), t), 9f, jointPaint)
                 }
+            }
+        }
+
+        f.faces.forEach { face ->
+            val left = mapX(face.box.left, t, f.mirrored)
+            val right = mapX(face.box.right, t, f.mirrored)
+            val l = minOf(left, right)
+            val r = maxOf(left, right)
+            val top = mapY(face.box.top, t)
+            val bottom = mapY(face.box.bottom, t)
+            val known = face.name != null && face.name != "Unknown"
+            facePaint.color = when {
+                face.name == null -> Color.parseColor("#7C93B2") // detector-only, no label
+                known -> Color.parseColor("#3FB950")
+                else -> Color.parseColor("#F8B94D")
+            }
+            canvas.drawRect(l, top, r, bottom, facePaint)
+            face.name?.let { label ->
+                canvas.drawText(label, l, (top - 10f).coerceAtLeast(30f), faceTextPaint)
             }
         }
 
