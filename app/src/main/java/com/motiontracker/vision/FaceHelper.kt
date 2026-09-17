@@ -46,10 +46,13 @@ data class FaceMatch(
  * gracefully instead of crashing: no detector -> no faces at all; no
  * embedder -> boxes with no name/enroll capability.
  *
- * The embedder assumes a MobileFaceNet-style model: 112x112 RGB input
- * normalized to roughly [-1,1], a single [1,192] float embedding output.
- * If your model differs, adjust EMBED_INPUT_SIZE / EMBED_OUTPUT_SIZE /
- * the normalization in [embed] to match its documented preprocessing.
+ * The embedder assumes a MobileFaceNet-style model: roughly 112x112 RGB
+ * input normalized to [-1,1], one face in -> one float embedding vector out.
+ * The exact input size and embedding length are read from the model file
+ * itself at load time (see embedInputSize/embedOutputSize below), so models
+ * with a different resolution or embedding length than the 112/192 defaults
+ * work with no code changes — only the pixel normalization below is a fixed
+ * assumption, since TFLite doesn't expose that in the model's shape info.
  */
 class FaceHelper(context: Context) {
 
@@ -80,6 +83,29 @@ class FaceHelper(context: Context) {
         null
     }
 
+    // Read the model's *actual* input/output tensor shapes at load time
+    // instead of assuming fixed sizes. This is what previously broke:
+    // hardcoding EMBED_OUTPUT_SIZE = 192 silently failed (and returned null
+    // from embed()) against models — like MobileFaceNet — that output 128
+    // numbers instead. Any single-face-in/single-embedding-out model now
+    // sizes itself correctly with no constant to hand-edit.
+    private val embedInputSize: Int by lazy {
+        try {
+            embedder?.getInputTensor(0)?.shape()?.getOrNull(1) ?: EMBED_INPUT_SIZE
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not read embedder input shape, defaulting to $EMBED_INPUT_SIZE: ${e.message}")
+            EMBED_INPUT_SIZE
+        }
+    }
+    private val embedOutputSize: Int by lazy {
+        try {
+            embedder?.getOutputTensor(0)?.shape()?.lastOrNull() ?: EMBED_OUTPUT_SIZE
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not read embedder output shape, defaulting to $EMBED_OUTPUT_SIZE: ${e.message}")
+            EMBED_OUTPUT_SIZE
+        }
+    }
+
     val hasDetector: Boolean get() = faceDetector != null
     val hasEmbedder: Boolean get() = embedder != null
 
@@ -96,6 +122,8 @@ class FaceHelper(context: Context) {
      */
     fun embed(bitmap: Bitmap, pixelBox: Rect): FloatArray? {
         val net = embedder ?: return null
+        val inputSize = embedInputSize
+        val outputSize = embedOutputSize
         val left = pixelBox.left.coerceIn(0, bitmap.width - 1)
         val top = pixelBox.top.coerceIn(0, bitmap.height - 1)
         val right = pixelBox.right.coerceIn(left + 1, bitmap.width)
@@ -105,23 +133,23 @@ class FaceHelper(context: Context) {
         } catch (_: Exception) {
             return null
         }
-        val resized = Bitmap.createScaledBitmap(crop, EMBED_INPUT_SIZE, EMBED_INPUT_SIZE, true)
-        val input = ByteBuffer.allocateDirect(4 * EMBED_INPUT_SIZE * EMBED_INPUT_SIZE * 3)
+        val resized = Bitmap.createScaledBitmap(crop, inputSize, inputSize, true)
+        val input = ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3)
             .order(ByteOrder.nativeOrder())
-        val pixels = IntArray(EMBED_INPUT_SIZE * EMBED_INPUT_SIZE)
-        resized.getPixels(pixels, 0, EMBED_INPUT_SIZE, 0, 0, EMBED_INPUT_SIZE, EMBED_INPUT_SIZE)
+        val pixels = IntArray(inputSize * inputSize)
+        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
         for (p in pixels) {
             input.putFloat((((p shr 16) and 0xFF) - 127.5f) / 128f)
             input.putFloat((((p shr 8) and 0xFF) - 127.5f) / 128f)
             input.putFloat(((p and 0xFF) - 127.5f) / 128f)
         }
         input.rewind()
-        val output = Array(1) { FloatArray(EMBED_OUTPUT_SIZE) }
+        val output = Array(1) { FloatArray(outputSize) }
         return try {
             net.run(input, output)
             l2Normalize(output[0])
         } catch (e: Exception) {
-            Log.e(TAG, "Embedding failed: ${e.message}")
+            Log.e(TAG, "Embedding failed (input=${inputSize}x$inputSize output=$outputSize): ${e.message}")
             null
         }
     }
@@ -135,8 +163,8 @@ class FaceHelper(context: Context) {
         private const val TAG = "FaceHelper"
         private const val FACE_DETECT_MODEL = "face_detection_short_range.tflite"
         private const val FACE_EMBED_MODEL = "face_recognition.tflite"
-        const val EMBED_INPUT_SIZE = 112
-        const val EMBED_OUTPUT_SIZE = 128
+        const val EMBED_INPUT_SIZE = 112   // fallback if the model's shape can't be read
+        const val EMBED_OUTPUT_SIZE = 192  // fallback if the model's shape can't be read
 
         fun detectorModelExists(context: Context): Boolean = try {
             context.assets.open(FACE_DETECT_MODEL).close(); true
