@@ -136,7 +136,7 @@ class FaceHelper(context: Context) {
         private const val FACE_DETECT_MODEL = "face_detection_short_range.tflite"
         private const val FACE_EMBED_MODEL = "face_recognition.tflite"
         const val EMBED_INPUT_SIZE = 112
-        const val EMBED_OUTPUT_SIZE = 192
+        const val EMBED_OUTPUT_SIZE = 128
 
         fun detectorModelExists(context: Context): Boolean = try {
             context.assets.open(FACE_DETECT_MODEL).close(); true
