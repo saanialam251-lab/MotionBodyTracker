@@ -200,14 +200,20 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun enrollFace(name: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
-        if (!::analyzer.isInitialized || !::faceStore.isInitialized) return
+        if (!::analyzer.isInitialized || !::faceStore.isInitialized || !::faceHelper.isInitialized) return
         val embedding = analyzer.lastFaces.firstOrNull { it.embedding != null }?.embedding
         if (embedding == null) {
+            val reason = faceHelper.lastEmbedError
             _ui.value = _ui.value.copy(
-                enrollMessage = if (!_ui.value.faceEmbedderReady) {
-                    "Face recognition model not installed — see README"
-                } else {
-                    "No face detected right now — look at the camera and try again"
+                enrollMessage = when {
+                    !_ui.value.faceEmbedderReady ->
+                        "Face recognition model not installed — see README"
+                    reason != null ->
+                        "Recognition model error: $reason"
+                    analyzer.lastFaces.isEmpty() ->
+                        "No face detected right now — look at the camera and try again"
+                    else ->
+                        "Couldn't read that face — try again with better lighting"
                 }
             )
             return
