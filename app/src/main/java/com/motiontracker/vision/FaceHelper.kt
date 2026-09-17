@@ -84,17 +84,28 @@ class FaceHelper(context: Context) {
     }
 
     // Read the model's *actual* input/output tensor shapes at load time
-    // instead of assuming fixed sizes. This is what previously broke:
-    // hardcoding EMBED_OUTPUT_SIZE = 192 silently failed (and returned null
-    // from embed()) against models — like MobileFaceNet — that output 128
-    // numbers instead. Any single-face-in/single-embedding-out model now
-    // sizes itself correctly with no constant to hand-edit.
-    private val embedInputSize: Int by lazy {
+    // instead of assuming fixed sizes or a fixed layout. Two things
+    // previously broke silently: (1) hardcoding EMBED_OUTPUT_SIZE = 192
+    // against models — like MobileFaceNet — that output 128 numbers, and
+    // (2) assuming TFLite's usual channel-last [1,H,W,3] layout when a
+    // model exported from PyTorch (channel-first natively) keeps a
+    // [1,3,H,W] input instead. Both are now detected from the model file
+    // itself, so mismatched shape/layout can't silently fail anymore.
+    private data class InputLayout(val nchw: Boolean, val height: Int, val width: Int)
+
+    private val inputLayout: InputLayout by lazy {
+        val fallback = InputLayout(nchw = false, height = EMBED_INPUT_SIZE, width = EMBED_INPUT_SIZE)
         try {
-            embedder?.getInputTensor(0)?.shape()?.getOrNull(1) ?: EMBED_INPUT_SIZE
+            val shape = embedder?.getInputTensor(0)?.shape()
+            when {
+                shape == null || shape.size != 4 -> fallback
+                shape[3] == 3 -> InputLayout(nchw = false, height = shape[1], width = shape[2])
+                shape[1] == 3 -> InputLayout(nchw = true, height = shape[2], width = shape[3])
+                else -> fallback
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Could not read embedder input shape, defaulting to $EMBED_INPUT_SIZE: ${e.message}")
-            EMBED_INPUT_SIZE
+            Log.e(TAG, "Could not read embedder input shape, defaulting to ${EMBED_INPUT_SIZE}x$EMBED_INPUT_SIZE NHWC: ${e.message}")
+            fallback
         }
     }
     private val embedOutputSize: Int by lazy {
@@ -105,6 +116,11 @@ class FaceHelper(context: Context) {
             EMBED_OUTPUT_SIZE
         }
     }
+
+    /** Set whenever [embed] fails, so callers (the Enroll button in
+     * particular) can show the real reason instead of a generic message. */
+    @Volatile var lastEmbedError: String? = null
+        private set
 
     val hasDetector: Boolean get() = faceDetector != null
     val hasEmbedder: Boolean get() = embedder != null
@@ -122,34 +138,49 @@ class FaceHelper(context: Context) {
      */
     fun embed(bitmap: Bitmap, pixelBox: Rect): FloatArray? {
         val net = embedder ?: return null
-        val inputSize = embedInputSize
-        val outputSize = embedOutputSize
+        val layout = inputLayout
+        val w = layout.width
+        val h = layout.height
         val left = pixelBox.left.coerceIn(0, bitmap.width - 1)
         val top = pixelBox.top.coerceIn(0, bitmap.height - 1)
         val right = pixelBox.right.coerceIn(left + 1, bitmap.width)
         val bottom = pixelBox.bottom.coerceIn(top + 1, bitmap.height)
         val crop = try {
             Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastEmbedError = "Couldn't crop face region: ${e.message}"
             return null
         }
-        val resized = Bitmap.createScaledBitmap(crop, inputSize, inputSize, true)
-        val input = ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3)
-            .order(ByteOrder.nativeOrder())
-        val pixels = IntArray(inputSize * inputSize)
-        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
-        for (p in pixels) {
-            input.putFloat((((p shr 16) and 0xFF) - 127.5f) / 128f)
-            input.putFloat((((p shr 8) and 0xFF) - 127.5f) / 128f)
-            input.putFloat(((p and 0xFF) - 127.5f) / 128f)
+        val resized = Bitmap.createScaledBitmap(crop, w, h, true)
+        val pixels = IntArray(w * h)
+        resized.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val input = ByteBuffer.allocateDirect(4 * w * h * 3).order(ByteOrder.nativeOrder())
+        if (layout.nchw) {
+            // Channel-first (PyTorch-style) layout: all R values, then all
+            // G, then all B — as opposed to TFLite's usual interleaved
+            // per-pixel RGB. Getting this backwards produces the same
+            // "wrong total byte count" crash as a wrong H/W would.
+            for (p in pixels) input.putFloat((((p shr 16) and 0xFF) - 127.5f) / 128f)
+            for (p in pixels) input.putFloat((((p shr 8) and 0xFF) - 127.5f) / 128f)
+            for (p in pixels) input.putFloat(((p and 0xFF) - 127.5f) / 128f)
+        } else {
+            for (p in pixels) {
+                input.putFloat((((p shr 16) and 0xFF) - 127.5f) / 128f)
+                input.putFloat((((p shr 8) and 0xFF) - 127.5f) / 128f)
+                input.putFloat(((p and 0xFF) - 127.5f) / 128f)
+            }
         }
         input.rewind()
-        val output = Array(1) { FloatArray(outputSize) }
+        val output = Array(1) { FloatArray(embedOutputSize) }
         return try {
             net.run(input, output)
+            lastEmbedError = null
             l2Normalize(output[0])
         } catch (e: Exception) {
-            Log.e(TAG, "Embedding failed (input=${inputSize}x$inputSize output=$outputSize): ${e.message}")
+            val msg = "input=${w}x$h (${if (layout.nchw) "NCHW" else "NHWC"}) output=$embedOutputSize: ${e.message}"
+            Log.e(TAG, "Embedding failed: $msg")
+            lastEmbedError = msg
             null
         }
     }
