@@ -14,9 +14,9 @@ data class MotionBox(val x: Float, val y: Float, val w: Float, val h: Float)
  * A pixel counts as moved when its brightness change exceeds [pixelThreshold].
  */
 class MotionDetector(
-    private val width: Int = 96,
-    private val height: Int = 54,
-    private val pixelThreshold: Int = 28
+    private val width: Int = 160,
+    private val height: Int = 90,
+    private val pixelThreshold: Int = 18
 ) {
 
     private var prev: ByteArray? = null
