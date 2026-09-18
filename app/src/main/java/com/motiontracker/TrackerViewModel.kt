@@ -74,7 +74,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 val faceEmbedderReady = FaceHelper.embedderModelExists(app)
 
                 analyzer = FrameAnalyzer(helper, faceHelper, faceStore, viewModelScope) {
-                    motionPct, hot, label, gesture, actionGesture, unknownFaceAlert ->
+                    motionPct, hot, label, gesture, actionGesture, unknownFaceAlert, motionSnapshotTrigger ->
 
                     val current = _ui.value
                     var running = current.running
@@ -82,7 +82,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     if (current.gesturesOn) {
                         // actionGesture is edge-triggered by FrameAnalyzer: it is only
                         // non-NONE on the single frame a gesture first becomes stable,
-                        // so each branch below fires once per palm/peace/fist, not once
+                        // so each branch below fires once per palm/fist, not once
                         // per analyzed frame the gesture stays held.
                         when (actionGesture) {
                             HandGesture.OPEN_PALM -> if (!running) {
@@ -94,9 +94,17 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                                 running = false
                                 analyzer.running = false
                             }
-                            HandGesture.PEACE -> if (running) snapshotRequest = System.currentTimeMillis()
                             else -> {}
                         }
+                    }
+
+                    // Snapshot now fires off motion itself (the motion box
+                    // turning red / "hot") instead of requiring the Peace
+                    // gesture — motionSnapshotTrigger is already edge/cooldown
+                    // gated in FrameAnalyzer, so this fires once per motion
+                    // event rather than every frame motion stays hot.
+                    if (running && motionSnapshotTrigger) {
+                        snapshotRequest = System.currentTimeMillis()
                     }
 
                     if (unknownFaceAlert) {
