@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
@@ -161,6 +164,27 @@ fun TrackerApp(vm: TrackerViewModel = viewModel()) {
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                // CameraX's default analysis resolution is a low, fixed
+                // size chosen for smooth performance — far below what the
+                // sensor can actually capture. That's fine for hand/pose
+                // landmarks (which need a whole limb in frame) but it's
+                // exactly what was throwing away the pixels a distant face
+                // needed to be detectable at all. Asking for something
+                // closer to what the sensor can do gives the face detector
+                // more to work with for faces further from the camera.
+                // STRATEGY_KEEP_ONLY_LATEST above means a slower per-frame
+                // analysis still won't cause backlog — frames get dropped,
+                // not queued, if processing can't keep up.
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(1920, 1080),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                            )
+                        )
+                        .build()
+                )
                 .build()
                 .also { it.setAnalyzer(analyzerExecutor, vm.analyzer) }
             val selector = if (ui.frontCamera) {
@@ -457,7 +481,7 @@ private fun ToggleButton(text: String, active: Boolean, onClick: () -> Unit) {
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
     ) { Text(text, fontSize = MaterialTheme.typography.bodySmall.fontSize) }
 }
-
+ 
 private fun saveSnapshot(context: android.content.Context, bmp: android.graphics.Bitmap) {
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, "tracker_${System.currentTimeMillis()}.png")
