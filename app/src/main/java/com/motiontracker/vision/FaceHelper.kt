@@ -117,6 +117,24 @@ class FaceHelper(context: Context) {
         }
     }
 
+    // Some bundled embedders declare a fixed *output* batch dimension other
+    // than 1 (e.g. shape [2, 128]) even though they only ever take one face
+    // crop as input. Previously the output buffer was hardcoded to
+    // Array(1) { FloatArray(embedOutputSize) }, so any model whose output
+    // batch wasn't exactly 1 threw "Cannot copy from a TensorFlowLite tensor
+    // ... to a Java object with shape [1, N]" on every single call — meaning
+    // every face silently failed to embed and all fell back to the same
+    // generic "Face"/"Unknown" label, which is why every face looked the
+    // same. Reading the real batch size here and only reading row 0 back out
+    // (the embedding for the one face we actually fed in) fixes that.
+    private val embedOutputBatch: Int by lazy {
+        try {
+            embedder?.getOutputTensor(0)?.shape()?.let { if (it.size >= 2) it[0] else 1 } ?: 1
+        } catch (e: Exception) {
+            1
+        }
+    }
+
     /** Set whenever [embed] fails, so callers (the Enroll button in
      * particular) can show the real reason instead of a generic message. */
     @Volatile var lastEmbedError: String? = null
@@ -172,13 +190,15 @@ class FaceHelper(context: Context) {
             }
         }
         input.rewind()
-        val output = Array(1) { FloatArray(embedOutputSize) }
+        val output = Array(embedOutputBatch) { FloatArray(embedOutputSize) }
         return try {
             net.run(input, output)
             lastEmbedError = null
+            // Row 0 is the embedding for the single crop we fed in, even
+            // when the model's declared output batch is >1.
             l2Normalize(output[0])
         } catch (e: Exception) {
-            val msg = "input=${w}x$h (${if (layout.nchw) "NCHW" else "NHWC"}) output=$embedOutputSize: ${e.message}"
+            val msg = "input=${w}x$h (${if (layout.nchw) "NCHW" else "NHWC"}) output=[$embedOutputBatch, $embedOutputSize]: ${e.message}"
             Log.e(TAG, "Embedding failed: $msg")
             lastEmbedError = msg
             null
