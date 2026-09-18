@@ -38,7 +38,8 @@ class FrameAnalyzer(
         label: String,
         gesture: HandGesture,
         actionGesture: HandGesture,
-        unknownFaceAlert: Boolean
+        unknownFaceAlert: Boolean,
+        motionSnapshotTrigger: Boolean
     ) -> Unit
 ) : ImageAnalysis.Analyzer {
 
@@ -73,6 +74,15 @@ class FrameAnalyzer(
     // (if it lingers) again every UNKNOWN_ALERT_COOLDOWN_MS so a stranger who
     // stays in frame still gets flagged periodically, not just once ever.
     private var lastUnknownAlertAt = 0L
+
+    // Motion-triggered snapshot: fires once when the motion box first turns
+    // "hot" (red, i.e. motionPercent crosses the sensitivity threshold), then
+    // re-arms once motion drops back below it — same edge-trigger shape as
+    // actionEdge() above, but keyed off motion instead of a held gesture, and
+    // with its own cooldown so sustained motion still gets periodic snapshots
+    // rather than exactly one for the whole event.
+    private var wasHot = false
+    private var lastMotionSnapshotAt = 0L
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -135,6 +145,16 @@ class FrameAnalyzer(
             val hot = motionOn && pct >= sensitivity
             val now = System.currentTimeMillis()
 
+            val motionSnapshotTrigger = if (hot) {
+                val fire = !wasHot || now - lastMotionSnapshotAt > MOTION_SNAPSHOT_COOLDOWN_MS
+                wasHot = true
+                if (fire) lastMotionSnapshotAt = now
+                fire
+            } else {
+                wasHot = false
+                false
+            }
+
             val hasUnknown = faceOn && faceHelper.hasEmbedder && faces.any { it.name == "Unknown" }
             val fireUnknownAlert = if (hasUnknown) {
                 if (now - lastUnknownAlertAt > UNKNOWN_ALERT_COOLDOWN_MS) {
@@ -159,7 +179,7 @@ class FrameAnalyzer(
                 else -> ""
             }
             scope.launch(Dispatchers.Main) {
-                onUpdate(pct, hot, label, stable, actionGesture, fireUnknownAlert)
+                onUpdate(pct, hot, label, stable, actionGesture, fireUnknownAlert, motionSnapshotTrigger)
             }
         } catch (_: Exception) {
             // drop this frame
@@ -288,6 +308,7 @@ class FrameAnalyzer(
 
     companion object {
         private const val UNKNOWN_ALERT_COOLDOWN_MS = 30_000L
+        private const val MOTION_SNAPSHOT_COOLDOWN_MS = 3_000L
     }
 }
 
