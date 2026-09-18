@@ -64,7 +64,17 @@ class FaceHelper(context: Context) {
                 context,
                 FaceDetector.FaceDetectorOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setModelAssetPath(FACE_DETECT_MODEL).build())
-                    .setMinDetectionConfidence(0.5f)
+                    // Lowered from 0.5: the short-range detector was missing
+                    // real faces entirely ("Faces: 0" with people plainly in
+                    // frame) whenever they were a bit small, angled, or
+                    // dim-lit — all common at normal room distance, not just
+                    // at the detector's nominal ~2m range limit. Trading a
+                    // few more low-confidence boxes for far fewer missed
+                    // faces; the embedder + FaceStore threshold downstream
+                    // still separates known/unknown, so a stray low-quality
+                    // box just reads as "Unknown" rather than corrupting a
+                    // match.
+                    .setMinDetectionConfidence(0.3f)
                     .setRunningMode(RunningMode.LIVE_STREAM)
                     .setResultListener { r, _ -> latestFaces = r }
                     .setErrorListener { e -> Log.e(TAG, e.message ?: "face detector error") }
