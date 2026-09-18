@@ -27,6 +27,63 @@ data class LandmarkFrame(
     val faces: List<FaceMatch> = emptyList()
 )
 
+/**
+ * Smooths face identity across frames. There's no persistent face ID from
+ * the detector — every frame's detections are independent — so a face
+ * sitting still can flip "Unknown" / "known name" from frame to frame purely
+ * from embedding noise (lighting, crop jitter) putting the cosine score just
+ * above or below FaceStore's threshold on different frames. This tracks
+ * faces frame-to-frame by box proximity (nearest-center, good enough for the
+ * handful of faces a phone camera sees at once) and reports the majority
+ * vote of each track's last few raw matches instead of the single newest
+ * one, so a name only "sticks" once it's been the most common answer
+ * recently, and a single noisy frame can't flip it back and forth.
+ */
+private class FaceIdentityTracker {
+    private data class Track(var box: RectF, val history: ArrayDeque<String>, var lastSeen: Long)
+
+    private val tracks = mutableListOf<Track>()
+
+    fun smooth(faces: List<FaceMatch>, hasEmbedder: Boolean): List<FaceMatch> {
+        if (!hasEmbedder || faces.isEmpty()) return faces
+        val now = System.currentTimeMillis()
+        tracks.removeAll { now - it.lastSeen > STALE_MS }
+        val usedTracks = mutableSetOf<Track>()
+        return faces.map { face ->
+            val cx = (face.box.left + face.box.right) / 2f
+            val cy = (face.box.top + face.box.bottom) / 2f
+            var best: Track? = null
+            var bestDist = MATCH_DIST
+            for (t in tracks) {
+                if (t in usedTracks) continue
+                val tcx = (t.box.left + t.box.right) / 2f
+                val tcy = (t.box.top + t.box.bottom) / 2f
+                val d = kotlin.math.hypot((cx - tcx).toDouble(), (cy - tcy).toDouble()).toFloat()
+                if (d < bestDist) { bestDist = d; best = t }
+            }
+            val track = best ?: Track(face.box, ArrayDeque(), now).also { tracks.add(it) }
+            track.box = face.box
+            track.lastSeen = now
+            usedTracks.add(track)
+
+            val rawName = face.name ?: "Unknown"
+            track.history.addLast(rawName)
+            while (track.history.size > HISTORY) track.history.removeFirst()
+            val smoothedName = track.history.groupingBy { it }.eachCount()
+                .entries.maxByOrNull { it.value }?.key ?: rawName
+            face.copy(name = smoothedName)
+        }
+    }
+
+    companion object {
+        private const val HISTORY = 5
+        // Normalized (0-1) distance between box centers to still count as
+        // "the same face" moving slightly between frames.
+        private const val MATCH_DIST = 0.18f
+        private const val STALE_MS = 2000L
+    }
+}
+
 class FrameAnalyzer(
     private val helper: LandmarkerHelper,
     private val faceHelper: FaceHelper,
@@ -84,6 +141,8 @@ class FrameAnalyzer(
     private var wasHot = false
     private var lastMotionSnapshotAt = 0L
 
+    private val identityTracker = FaceIdentityTracker()
+
     override fun analyze(image: ImageProxy) {
         try {
             val trackFull = running
@@ -129,7 +188,7 @@ class FrameAnalyzer(
             lastBody = pose != null
 
             val faces = if (faceOn && bitmap != null) {
-                buildFaceMatches(bitmap)
+                identityTracker.smooth(buildFaceMatches(bitmap), faceHelper.hasEmbedder)
             } else {
                 emptyList()
             }
@@ -145,17 +204,30 @@ class FrameAnalyzer(
             val hot = motionOn && pct >= sensitivity
             val now = System.currentTimeMillis()
 
-            val motionSnapshotTrigger = if (hot) {
+            // Only "Unknown" (or no identity info at all) should trigger a
+            // motion snapshot. A known/enrolled person moving around does
+            // not — but if an unknown person is also in frame, that unknown
+            // presence still fires the snapshot regardless of who else is
+            // there. When face recognition is off/unavailable, or no faces
+            // are visible at all, there's no identity to suppress on, so
+            // motion behaves as before (always triggers).
+            val anyUnknown = faceOn && faceHelper.hasEmbedder &&
+                faces.any { it.name == "Unknown" }
+            val allKnown = faceOn && faceHelper.hasEmbedder && faces.isNotEmpty() &&
+                faces.all { it.name != null && it.name != "Unknown" }
+            val knownOnlySuppressesSnapshot = allKnown && !anyUnknown
+
+            val motionSnapshotTrigger = if (hot && !knownOnlySuppressesSnapshot) {
                 val fire = !wasHot || now - lastMotionSnapshotAt > MOTION_SNAPSHOT_COOLDOWN_MS
                 wasHot = true
                 if (fire) lastMotionSnapshotAt = now
                 fire
             } else {
-                wasHot = false
+                wasHot = hot
                 false
             }
 
-            val hasUnknown = faceOn && faceHelper.hasEmbedder && faces.any { it.name == "Unknown" }
+            val hasUnknown = anyUnknown
             val fireUnknownAlert = if (hasUnknown) {
                 if (now - lastUnknownAlertAt > UNKNOWN_ALERT_COOLDOWN_MS) {
                     lastUnknownAlertAt = now
