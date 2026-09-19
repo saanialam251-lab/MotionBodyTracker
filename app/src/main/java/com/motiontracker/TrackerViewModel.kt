@@ -202,14 +202,28 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(snapshotRequest = 0L)
     }
 
-    /** Enrolls [name] using the embedding of the most recently seen face.
-     * No-op (with an explanatory [TrackerUiState.enrollMessage]) if there's
-     * no face in frame or the recognition model isn't bundled. */
+    /** Enrolls [name] using the embedding of the largest (closest/most
+     * prominent) face currently in frame. No-op (with an explanatory
+     * [TrackerUiState.enrollMessage]) if there's no face in frame or the
+     * recognition model isn't bundled.
+     *
+     * Picking the *largest* face rather than just the first one in the list
+     * matters as soon as more than one face is in frame: the detector's
+     * ordering isn't "the face closest to camera" or "the face you're
+     * pointing at" — it's whatever internal order the model happened to
+     * return that frame, which can put a stranger in the background ahead
+     * of the person you actually meant to enroll. That silently enrolled
+     * the wrong face under the name you typed, which is why an
+     * unenrolled bystander could end up tagged with someone else's name
+     * while the person actually being aimed at (almost always the largest
+     * face, since they're closest to the camera) never got stored at all. */
     fun enrollFace(name: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         if (!::analyzer.isInitialized || !::faceStore.isInitialized || !::faceHelper.isInitialized) return
-        val embedding = analyzer.lastFaces.firstOrNull { it.embedding != null }?.embedding
+        val candidates = analyzer.lastFaces.filter { it.embedding != null }
+        val target = candidates.maxByOrNull { it.box.width().toDouble() * it.box.height().toDouble() }
+        val embedding = target?.embedding
         if (embedding == null) {
             val reason = faceHelper.lastEmbedError
             _ui.value = _ui.value.copy(
@@ -226,9 +240,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
+        // If this embedding already reads as a strong match for a
+        // *different* already-known name, flag it rather than silently
+        // creating a second name for what may be the same face (or the
+        // wrong face) — this is exactly the failure mode above, surfaced
+        // at enroll time instead of discovered later during recognition.
+        val existingMatch = faceStore.match(embedding)
+        val extraNote = if (existingMatch != null && existingMatch.first != trimmed) {
+            " (note: this face already closely matches known person \"${existingMatch.first}\" — " +
+                "make sure you're pointing at the right person before continuing)"
+        } else ""
+
         faceStore.enroll(trimmed, embedding)
+        val multiFaceNote = if (candidates.size > 1) " — used the largest face in frame" else ""
         _ui.value = _ui.value.copy(
-            enrollMessage = "Enrolled \"$trimmed\"",
+            enrollMessage = "Enrolled \"$trimmed\"$multiFaceNote$extraNote",
             knownFaceNames = faceStore.names()
         )
     }
